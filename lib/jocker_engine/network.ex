@@ -80,8 +80,8 @@ defmodule Jocker.Engine.Network do
   end
 
   @spec connect(String.t(), String.t()) :: :ok | {:error, String.t()}
-  def disconnect(container, network_id) do
-    GenServer.call(__MODULE__, {:disconnect, container, network_id})
+  def disconnect(container_idname, network_idname) do
+    GenServer.call(__MODULE__, {:disconnect, container_idname, network_idname})
   end
 
   def disconnect_all(container_id) do
@@ -361,6 +361,9 @@ defmodule Jocker.Engine.Network do
         case System.cmd("/sbin/pfctl", ["-f", pf_config_path]) do
           {_, 0} ->
             :ok
+
+          {"", 1} ->
+            Logger.error("Failed to load PF configuration file. 'pfctl' returned with an error.")
 
           {error_output, 1} ->
             Logger.error(
