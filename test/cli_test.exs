@@ -1,12 +1,18 @@
 defmodule CLITest do
   use ExUnit.Case
-  alias Jocker.Engine.Container
-  alias Jocker.Engine.Image
-  alias Jocker.Engine.MetaData
-  alias Jocker.Engine.Volume
-  alias Jocker.Engine.Config
-  alias Jocker.Engine.Utils
-  import Jocker.Engine.Records
+
+  alias Jocker.Engine.{
+    Container,
+    Image,
+    MetaData,
+    Volume,
+    Config,
+    Utils,
+    Layer,
+    APIServer,
+    Network
+  }
+
   require Logger
 
   @moduletag :capture_log
@@ -14,18 +20,19 @@ defmodule CLITest do
   setup_all do
     Application.stop(:jocker)
     TestHelper.clear_zroot()
-    start_supervised(Config)
+    {:ok, _pid} = start_supervised(Config)
     remove_volume_mounts()
-    start_supervised(MetaData)
-    start_supervised(Jocker.Engine.Layer)
+    {:ok, _pid} = start_supervised(MetaData)
+    {:ok, _pid} = start_supervised(Layer)
 
-    start_supervised(
-      {DynamicSupervisor,
-       name: Jocker.Engine.ContainerPool, strategy: :one_for_one, max_restarts: 0}
-    )
+    {:ok, _pid} =
+      start_supervised(
+        {DynamicSupervisor,
+         name: Jocker.Engine.ContainerPool, strategy: :one_for_one, max_restarts: 0}
+      )
 
-    {:ok, _pid} = start_supervised(Jocker.Engine.APIServer)
-    start_supervised(Jocker.Engine.Network)
+    {:ok, _pid} = start_supervised(APIServer)
+    {:ok, _pid} = start_supervised(Network)
     :ok
   end
 
@@ -38,7 +45,8 @@ defmodule CLITest do
     end)
 
     on_exit(fn ->
-      MetaData.list_images() |> Enum.map(fn image(id: id) -> Image.destroy(id) end)
+      # To ensure that all containers have been destroyed (apparantly it is async)
+      MetaData.list_images() |> Enum.map(fn %Image{id: id} -> Image.destroy(id) end)
     end)
 
     :ok
@@ -84,32 +92,18 @@ defmodule CLITest do
   end
 
   test "jocker image ls" do
-    img_id1 = "test-img-id1"
-    img_id2 = "test-img-id2"
-
-    img1 =
-      image(
-        id: img_id1,
-        name: "test-image",
-        tag: "latest",
-        command: "/bin/ls",
-        created: epoch(1)
-      )
-
-    img2 = image(img1, created: epoch(2), id: img_id2, name: "lol")
-
     header = "NAME           TAG          IMAGE ID       CREATED           \n"
-    row1 = "test-image     latest       #{img_id1}   51 years          \n"
-    row2 = "lol            latest       #{img_id2}   51 years          \n"
 
     # Test list one
-    MetaData.add_image(img1)
+    img_id1 = create_image_at_timestamp("test-image:latest", epoch(1))
+    row1 = "test-image     latest       #{img_id1}   51 years          \n"
     assert cmd("image ls") == [header, row1]
 
     # Test list two
-    MetaData.add_image(img2)
-
+    img_id2 = create_image_at_timestamp("lol:latest", epoch(2))
+    row2 = "lol            latest       #{img_id2}   51 years          \n"
     assert cmd("image ls") == [header, row2, row1]
+
     MetaData.delete_image(img_id1)
     MetaData.delete_image(img_id2)
   end
@@ -118,7 +112,7 @@ defmodule CLITest do
     path = "./test/data/test_cli_build_image"
 
     id = cmd("image build --quiet #{path}")
-    assert image(name: "<none>", tag: "<none>") = MetaData.get_image(id)
+    assert %Image{name: "<none>", tag: "<none>"} = MetaData.get_image(id)
     assert cmd("image rm #{id}") == id
     assert :not_found == MetaData.get_image(id)
   end
@@ -127,53 +121,49 @@ defmodule CLITest do
     path = "./test/data/test_cli_build_image"
 
     id = cmd("image build --quiet -t lol:test #{path}")
-    assert image(name: "lol", tag: "test") = MetaData.get_image(id)
+    assert %Image{name: "lol", tag: "test"} = MetaData.get_image(id)
     assert cmd("image rm #{id}") == id
     assert :not_found == MetaData.get_image(id)
   end
 
   test "jocker container ls" do
-    MetaData.add_image(image(id: "img_id", name: "", tag: "latest", created: epoch(1)))
-    MetaData.add_image(image(id: "lel", name: "img_name", tag: "latest", created: epoch(2)))
+    img_id1_tag = "lol1:latest"
+    img_id2_tag = "lol2:latest"
+    img_id1 = create_image_at_timestamp(img_id1_tag, epoch(1))
+    img_id2 = create_image_at_timestamp(img_id2_tag, epoch(2))
 
-    MetaData.add_container(
-      container(
-        id: "1337",
-        image_id: "img_id",
-        name: "test1",
-        command: ["some_command"],
-        created: epoch(10)
-      )
-    )
+    MetaData.add_container(%Container{
+      id: "1337",
+      image_id: img_id1,
+      name: "test1",
+      command: ["some_command"],
+      created: epoch(10)
+    })
 
-    MetaData.add_container(
-      container(
-        id: "1338",
-        image_id: "lel",
-        name: "test2",
-        command: ["some_command"],
-        created: epoch(11)
-      )
-    )
+    MetaData.add_container(%Container{
+      id: "1338",
+      image_id: img_id2,
+      name: "test2",
+      command: ["some_command"],
+      created: epoch(11)
+    })
 
-    MetaData.add_container(
-      container(
-        id: "1339",
-        image_id: "base",
-        name: "test3",
-        command: ["some_command"],
-        created: epoch(12)
-      )
-    )
+    MetaData.add_container(%Container{
+      id: "1339",
+      image_id: "base",
+      name: "test3",
+      command: ["some_command"],
+      created: epoch(12)
+    })
 
     header =
       "CONTAINER ID   IMAGE                       COMMAND                   CREATED              STATUS    NAME\n"
 
     row_no_image_name =
-      "1337           img_id                      some_command              51 years             stopped   test1\n"
+      "1337           #{img_id1_tag}                 some_command              51 years             stopped   test1\n"
 
     row_with_tag =
-      "1338           img_name:latest             some_command              51 years             stopped   test2\n"
+      "1338           #{img_id2_tag}                 some_command              51 years             stopped   test2\n"
 
     row_base =
       "1339           base                        some_command              51 years             stopped   test3\n"
@@ -190,8 +180,8 @@ defmodule CLITest do
 
   test "create and remove a container" do
     id = cmd("container create base")
-    assert container(id: ^id, layer_id: layer_id) = MetaData.get_container(id)
-    layer(mountpoint: mountpoint) = MetaData.get_layer(layer_id)
+    assert %Container{id: ^id, layer_id: layer_id} = MetaData.get_container(id)
+    %Layer{mountpoint: mountpoint} = MetaData.get_layer(layer_id)
     assert is_directory?(mountpoint)
     assert cmd("container rm #{id}") == id
     assert not is_directory?(mountpoint)
@@ -219,17 +209,36 @@ defmodule CLITest do
 
   test "create a container with a custom command" do
     id = cmd("container create base /bin/mkdir /loltest")
-    assert container(id: ^id, layer_id: layer_id, pid: pid) = cont = MetaData.get_container(id)
+    assert %Container{id: ^id, layer_id: layer_id, pid: pid} = cont = MetaData.get_container(id)
 
     # We '--attach' to make sure the jail is done
 
     assert jocker_cmd("container start --attach #{id}") == []
-    layer(mountpoint: mountpoint) = MetaData.get_layer(layer_id)
+    %Layer{mountpoint: mountpoint} = MetaData.get_layer(layer_id)
     assert not TestHelper.devfs_mounted(cont)
     assert is_directory?(mountpoint)
     assert is_directory?(Path.join(mountpoint, "loltest"))
     assert cmd("container rm #{id}") == id
     assert not is_directory?(mountpoint)
+  end
+
+  test "create a container with custom environment variables" do
+    dockerfile = """
+    FROM scratch
+    ENV TESTVARIABLE1="some test content"
+    ENV TESTVARIABLE2=some other test content
+    CMD printenv
+    """
+
+    %Image{id: image_id} = create_image(dockerfile)
+    id = cmd("container create #{image_id}")
+
+    output = cmd("container start --attach #{id}")
+
+    assert output ==
+             "PWD=/\nTESTVARIABLE1=some test content\nTESTVARIABLE2=some other test content"
+
+    cmd("container rm #{id}")
   end
 
   test "jocker adding and removing a container with writable volumes" do
@@ -240,9 +249,9 @@ defmodule CLITest do
     RUN /usr/bin/touch /loltest
     """
 
-    image(id: image_id) = create_image(dockerfile)
+    %Image{id: image_id} = create_image(dockerfile)
 
-    volume(name: vol_name, mountpoint: mountpoint_vol) = vol1 = Volume.create_volume("testvol-1")
+    %Volume{name: vol_name, mountpoint: mountpoint_vol} = vol1 = Volume.create_volume("testvol-1")
     assert is_directory?(mountpoint_vol)
     assert Utils.touch(Path.join(mountpoint_vol, "testfile"))
 
@@ -252,15 +261,15 @@ defmodule CLITest do
       )
 
     assert jocker_cmd("container start --attach #{id}") == []
-    container(layer_id: layer_id) = MetaData.get_container(id)
-    layer(mountpoint: mountpoint) = MetaData.get_layer(layer_id)
+    %Container{layer_id: layer_id} = MetaData.get_container(id)
+    %Layer{mountpoint: mountpoint} = MetaData.get_layer(layer_id)
     assert is_file?(Path.join(mountpoint, "testdir1/testfile"))
     assert is_file?(Path.join(mountpoint, "/loltest"))
     assert is_file?(Path.join(mountpoint, "/testdir2/testfile2"))
 
     [vol2] =
-      Enum.reject(MetaData.list_volumes([]), fn
-        volume(name: ^vol_name) -> true
+      Enum.reject(MetaData.list_volumes(), fn
+        %Volume{name: ^vol_name} -> true
         _ -> false
       end)
 
@@ -278,8 +287,8 @@ defmodule CLITest do
     RUN mkdir /testdir2
     """
 
-    image(id: image_id) = create_image(dockerfile)
-    volume(name: vol_name, mountpoint: mountpoint_vol) = vol1 = Volume.create_volume("testvol-1")
+    %Image{id: image_id} = create_image(dockerfile)
+    %Volume{name: vol_name, mountpoint: mountpoint_vol} = vol1 = Volume.create_volume("testvol-1")
     assert is_directory?(mountpoint_vol)
     assert Utils.touch(Path.join(mountpoint_vol, "testfile_writable_from_mountpoint_vol"))
 
@@ -290,8 +299,8 @@ defmodule CLITest do
 
     jocker_cmd("container start --attach #{id}")
 
-    container(layer_id: layer_id) = MetaData.get_container(id)
-    layer(mountpoint: mountpoint) = MetaData.get_layer(layer_id)
+    %Container{layer_id: layer_id} = MetaData.get_container(id)
+    %Layer{mountpoint: mountpoint} = MetaData.get_layer(layer_id)
 
     assert is_file?(Path.join(mountpoint, "testdir1/testfile_writable_from_mountpoint_vol"))
     assert not is_file?(Path.join(mountpoint, "/testdir2/testfile2"))
@@ -299,8 +308,8 @@ defmodule CLITest do
     assert not Utils.touch(Path.join(mountpoint, "/testdir1/testfile1"))
 
     [vol2] =
-      Enum.reject(MetaData.list_volumes([]), fn
-        volume(name: ^vol_name) -> true
+      Enum.reject(MetaData.list_volumes(), fn
+        %Volume{name: ^vol_name} -> true
         _ -> false
       end)
 
@@ -318,8 +327,8 @@ defmodule CLITest do
 
   test "starting a long-running container and stopping it" do
     id = cmd("container create base /bin/sleep 10000")
-    container(name: name) = cont = MetaData.get_container(id)
-    MetaData.add_container(container(cont, created: epoch(1)))
+    %Container{name: name} = cont = MetaData.get_container(id)
+    MetaData.add_container(%Container{cont | created: epoch(1)})
 
     header =
       "CONTAINER ID   IMAGE                       COMMAND                   CREATED              STATUS    NAME\n"
@@ -410,7 +419,7 @@ defmodule CLITest do
     # Check for idempotency:
     assert ["testvol\n"] == jocker_cmd("volume create testvol")
 
-    volume(name: "testvol", dataset: dataset, mountpoint: mountpoint) =
+    %Volume{name: "testvol", dataset: dataset, mountpoint: mountpoint} =
       MetaData.get_volume("testvol")
 
     assert {:ok, %File.Stat{:type => :directory}} = File.stat(mountpoint)
@@ -454,6 +463,14 @@ defmodule CLITest do
 
     assert ["test2\n", "test1\n"] == jocker_cmd("volume ls --quiet")
     assert ["test2\n", "test1\n"] == jocker_cmd("volume ls -q")
+  end
+
+  defp create_image_at_timestamp(name_tag, timestamp) do
+    path = "./test/data/test_cli_build_image"
+    img_id2 = cmd("image build -t #{name_tag} --quiet #{path}")
+    img2 = MetaData.get_image(img_id2)
+    MetaData.add_image(%Image{img2 | created: timestamp})
+    img_id2
   end
 
   def create_image(content) do
@@ -565,7 +582,7 @@ defmodule CLITest do
 
   def mock_volume_creation_time() do
     volumes = MetaData.list_volumes()
-    Enum.map(volumes, fn vol -> MetaData.add_volume(volume(vol, created: epoch(1))) end)
+    Enum.map(volumes, fn vol -> MetaData.add_volume(%Volume{vol | created: epoch(1)}) end)
   end
 
   defp register_as_cli_master() do

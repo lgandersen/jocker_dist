@@ -1,6 +1,4 @@
-alias Jocker.Engine.ZFS
-alias Jocker.Engine.Config
-import Jocker.Engine.Records
+alias Jocker.Engine.{ZFS, Config, Container, Layer}
 
 ExUnit.start()
 
@@ -44,13 +42,37 @@ defmodule TestHelper do
     ZFS.create(zroot)
   end
 
-  def devfs_mounted(container(layer_id: layer_id)) do
-    layer(mountpoint: mountpoint) = Jocker.Engine.MetaData.get_layer(layer_id)
+  def devfs_mounted(%Container{layer_id: layer_id}) do
+    %Layer{mountpoint: mountpoint} = Jocker.Engine.MetaData.get_layer(layer_id)
     devfs_path = Path.join(mountpoint, "dev")
 
     case System.cmd("sh", ["-c", "mount | grep \"devfs on #{devfs_path}\""]) do
       {"", 1} -> false
       {_output, 0} -> true
     end
+  end
+
+  def build_and_return_image(context, dockerfile, tag) do
+    quiet = true
+    {:ok, pid} = Jocker.Engine.Image.build(context, dockerfile, tag, quiet)
+    {img, _messages} = receive_imagebuilder_results(pid, [])
+    img
+  end
+
+  def receive_imagebuilder_results(pid, msg_list) do
+    receive do
+      {:image_builder, ^pid, {:image_finished, img}} ->
+        {img, Enum.reverse(msg_list)}
+
+      {:image_builder, ^pid, msg} ->
+        receive_imagebuilder_results(pid, [msg | msg_list])
+
+      other ->
+        IO.puts("\nError! Received unkown message #{inspect(other)}")
+    end
+  end
+
+  def create_tmp_dockerfile(content, dockerfile, context \\ "./") do
+    :ok = File.write(Path.join(context, dockerfile), content, [:write])
   end
 end

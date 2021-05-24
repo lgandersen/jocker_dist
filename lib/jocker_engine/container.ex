@@ -5,14 +5,37 @@ defmodule Jocker.Engine.Container do
               starting_port: nil
   end
 
+  @derive Jason.Encoder
+  defstruct id: "",
+            name: "",
+            pid: "",
+            command: [],
+            layer_id: "",
+            image_id: "",
+            user: "",
+            parameters: [],
+            env_vars: [],
+            created: ""
+
+  alias __MODULE__, as: Container
+
   require Logger
-  alias Jocker.Engine.MetaData
-  alias Jocker.Engine.Volume
-  alias Jocker.Engine.Layer
-  alias Jocker.Engine.Network
-  alias Jocker.Engine.Records, as: JRecord
-  import JRecord
+  alias Jocker.Engine.{MetaData, Volume, Layer, Network, Image}
   use GenServer
+
+  @type t() ::
+          %Container{
+            id: String.t(),
+            name: String.t(),
+            pid: pid() | String.t(),
+            command: [String.t()],
+            layer_id: String.t(),
+            image_id: String.t(),
+            user: String.t(),
+            parameters: [String.t()],
+            env_vars: [String.t()],
+            created: String.t()
+          }
 
   @type create_opts() :: [
           {:existing_container, String.t()}
@@ -20,13 +43,17 @@ defmodule Jocker.Engine.Container do
           | {:name, String.t()}
           | {:cmd, [String.t()]}
           | {:user, String.t()}
+          | {:env, [String.t()]}
           | {:networks, [String.t()]}
           | {:jail_param, [String.t()]}
         ]
+
   @type list_containers_opts :: [
           {:all, boolean()}
         ]
+
   @type container_id() :: String.t()
+
   @type id_or_name() :: container_id() | String.t()
 
   ### ===================================================================
@@ -36,14 +63,14 @@ defmodule Jocker.Engine.Container do
     GenServer.start_link(__MODULE__, opts)
   end
 
-  @spec create(create_opts) :: {:ok, JRecord.container()} | :image_not_found
+  @spec create(create_opts) :: {:ok, Container.t()} | :image_not_found
   def create(options) do
     Logger.debug("Creating container with opts: #{inspect(options)}")
     image = MetaData.get_image(Keyword.get(options, :image, "base"))
     create_(image, options)
   end
 
-  @spec start(id_or_name()) :: {:ok, JRecord.container()} | {:error, :not_found}
+  @spec start(id_or_name()) :: {:ok, Container.t()} | {:error, :not_found}
   def start(id_or_name, opts \\ []) do
     cont = MetaData.get_container(id_or_name)
 
@@ -54,9 +81,9 @@ defmodule Jocker.Engine.Container do
   end
 
   @spec stop(id_or_name()) ::
-          {:ok, JRecord.container()} | {:error, :not_found} | {:error, :not_running}
+          {:ok, %Container{}} | {:error, :not_found} | {:error, :not_running}
   def stop(id_or_name) do
-    container(id: contaier_id) = cont = MetaData.get_container(id_or_name)
+    %Container{id: contaier_id} = cont = MetaData.get_container(id_or_name)
 
     case is_running?(contaier_id) do
       false ->
@@ -100,8 +127,8 @@ defmodule Jocker.Engine.Container do
   ### gen_server callbacks
   ### ===================================================================
   @impl true
-  def init([container(id: id) = cont]) do
-    updated_cont = container(cont, pid: self())
+  def init([%Container{id: id} = cont]) do
+    updated_cont = %Container{cont | pid: self()}
     MetaData.add_container(updated_cont)
     {:ok, %State{container_id: id, subscribers: []}}
   end
@@ -163,39 +190,41 @@ defmodule Jocker.Engine.Container do
   defp create_(:not_found, _), do: :image_not_found
 
   defp create_(
-         image(
+         %Image{
            id: image_id,
            user: default_user,
            command: default_cmd,
-           layer_id: parent_layer_id
-         ),
+           layer_id: parent_layer_id,
+           env_vars: img_env_vars
+         },
          opts
        ) do
     container_id = Jocker.Engine.Utils.uuid()
 
     parent_layer = Jocker.Engine.MetaData.get_layer(parent_layer_id)
-    layer(id: layer_id) = Layer.new(parent_layer, container_id)
+    %Layer{id: layer_id} = Layer.new(parent_layer, container_id)
 
     # Extract values from options:
     command = Keyword.get(opts, :cmd, default_cmd)
     user = Keyword.get(opts, :user, default_user)
     jail_param = Keyword.get(opts, :jail_param, [])
     name = Keyword.get(opts, :name, Jocker.Engine.NameGenerator.new())
+    env_vars = Keyword.get(opts, :env, []) ++ img_env_vars
 
     network_idnames =
       Keyword.get(opts, :networks, [Jocker.Engine.Config.get("default_network_name")])
 
-    cont =
-      container(
-        id: container_id,
-        name: name,
-        command: command,
-        layer_id: layer_id,
-        image_id: image_id,
-        user: user,
-        parameters: jail_param,
-        created: DateTime.to_iso8601(DateTime.utc_now())
-      )
+    cont = %Container{
+      id: container_id,
+      name: name,
+      command: command,
+      layer_id: layer_id,
+      image_id: image_id,
+      user: user,
+      parameters: jail_param,
+      env_vars: env_vars,
+      created: DateTime.to_iso8601(DateTime.utc_now())
+    }
 
     # Mount volumes into container (if any have been provided)
     bind_volumes(opts, cont)
@@ -208,17 +237,18 @@ defmodule Jocker.Engine.Container do
 
   defp start_(
          options,
-         container(
+         %Container{
            id: id,
            layer_id: layer_id,
            command: default_cmd,
            user: default_user,
-           parameters: parameters
-         ) = cont
+           parameters: parameters,
+           env_vars: env_vars
+         } = cont
        ) do
-    [cmd | cmd_args] = command = Keyword.get(options, :cmd, default_cmd)
+    command = Keyword.get(options, :cmd, default_cmd)
     user = Keyword.get(options, :user, default_user)
-    MetaData.add_container(container(cont, user: user, command: command))
+    MetaData.add_container(%Container{cont | user: user, command: command})
 
     network_config =
       case MetaData.connected_networks(id) do
@@ -231,11 +261,12 @@ defmodule Jocker.Engine.Container do
           "ip4.addr=#{ips_as_string}"
       end
 
-    layer(mountpoint: path) = Jocker.Engine.MetaData.get_layer(layer_id)
+    %Layer{mountpoint: path} = Jocker.Engine.MetaData.get_layer(layer_id)
 
     args =
       ~w"-c path=#{path} name=#{id} #{network_config}" ++
-        parameters ++ ["exec.jail_user=" <> user, "command=#{cmd}"] ++ cmd_args
+        parameters ++
+        ~w"exec.jail_user=#{user} command=/usr/bin/env -i" ++ env_vars ++ command
 
     Logger.debug("Executing /usr/sbin/jail #{Enum.join(args, " ")}")
 
@@ -264,9 +295,9 @@ defmodule Jocker.Engine.Container do
 
   defp destroy_(:not_found), do: {:error, :not_found}
 
-  defp destroy_(container(id: container_id, pid: pid, layer_id: layer_id) = cont) do
+  defp destroy_(%Container{id: container_id, pid: pid, layer_id: layer_id} = cont) do
     case pid do
-      :none -> :ok
+      "" -> :ok
       _ -> stop(container_id)
     end
 
@@ -293,21 +324,21 @@ defmodule Jocker.Engine.Container do
     end
   end
 
-  @spec spawn_container(JRecord.container() | :not_found) :: {:ok, pid()} | {:error, :not_found}
+  @spec spawn_container(%Container{} | :not_found) :: {:ok, pid()} | {:error, :not_found}
   defp spawn_container(:not_found), do: {:error, :not_found}
 
-  defp spawn_container(container(pid: :none) = cont) do
+  defp spawn_container(%Container{pid: ""} = cont) do
     DynamicSupervisor.start_child(
       Jocker.Engine.ContainerPool,
       {Jocker.Engine.Container, [cont]}
     )
   end
 
-  defp spawn_container(container(pid: pid)) do
+  defp spawn_container(%Container{pid: pid}) do
     {:ok, pid}
   end
 
-  defp shutdown_container(container(id: id) = cont, state) do
+  defp shutdown_container(%Container{id: id} = cont, state) do
     Logger.debug("Shutting down jail #{id}")
 
     if is_running?(id) do
@@ -316,7 +347,7 @@ defmodule Jocker.Engine.Container do
     end
 
     jail_cleanup(cont)
-    updated_container = container(cont, pid: :none)
+    updated_container = %Container{cont | pid: ""}
     MetaData.add_container(updated_container)
     relay_msg({:shutdown, :jail_stopped}, state)
   end
@@ -385,8 +416,8 @@ defmodule Jocker.Engine.Container do
     jails
   end
 
-  defp jail_cleanup(container(layer_id: layer_id)) do
-    layer(mountpoint: mountpoint) = Jocker.Engine.MetaData.get_layer(layer_id)
+  defp jail_cleanup(%Container{layer_id: layer_id}) do
+    %Layer{mountpoint: mountpoint} = Jocker.Engine.MetaData.get_layer(layer_id)
 
     # remove any devfs mounts of the jail. If it was closed with 'jail -r <jailname>' devfs should be removed automatically.
     # If the jail stops because there jailed process stops (i.e. 'jail -c <etc> /bin/sleep 10') then devfs is NOT removed.

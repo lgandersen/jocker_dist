@@ -1,7 +1,7 @@
 defmodule Jocker.CLI.Container do
   alias Jocker.CLI.Utils
+  alias Jocker.Engine.Container
   import Utils, only: [cell: 2, sp: 1, to_cli: 1, to_cli: 2, rpc: 1]
-  import Jocker.Engine.Records
   require Logger
 
   @doc """
@@ -104,6 +104,7 @@ defmodule Jocker.CLI.Container do
         --name string                    Assign a name to the container
         --network string                 Connect a container to a network
     -v, --volume                         Bind mount a volume
+    -e, --env                            Set environment variables (e.g. --env FIRST=env --env SECOND=env)
     -J, --jailparam string               Specify a jail parameter (see jail(8) for details)
 
   """
@@ -118,6 +119,7 @@ defmodule Jocker.CLI.Container do
         name: :string,
         network: :string,
         volume: :keep,
+        env: :keep,
         jailparam: :keep,
         help: :boolean
       ]
@@ -127,6 +129,12 @@ defmodule Jocker.CLI.Container do
   def create({options, [image | cmd]}) do
     options = convert_network_option(options)
     {mountdevfs_jailparam, options} = convert_mountdevfs_option(options)
+
+    env_vars =
+      Enum.reduce(options, [], fn
+        {:env, value}, acc -> [value | acc]
+        _other_option, acc -> acc
+      end)
 
     jail_param =
       Enum.reduce(options, [], fn
@@ -139,17 +147,17 @@ defmodule Jocker.CLI.Container do
     opts =
       case length(cmd) do
         0 ->
-          [image: image, jail_param: jail_param] ++ options
+          [env: env_vars, image: image, jail_param: jail_param] ++ options
 
         _n ->
-          [cmd: cmd, image: image, jail_param: jail_param] ++ options
+          [cmd: cmd, env: env_vars, image: image, jail_param: jail_param] ++ options
       end
 
     case rpc([Jocker.Engine.Container, :create, [opts]]) do
       :image_not_found ->
         to_cli("Unable to find image '#{image}'", :eof)
 
-      {:ok, container(id: id)} ->
+      {:ok, %Container{id: id}} ->
         to_cli("#{id}\n", :eof)
 
       :tcp_closed ->
@@ -253,7 +261,7 @@ defmodule Jocker.CLI.Container do
       end
     else
       case rpc([Jocker.Engine.Container, :start, [id_or_name]]) do
-        {:ok, container(id: id)} ->
+        {:ok, %Container{id: id}} ->
           to_cli("#{id}\n")
 
         {:error, :not_found} ->
@@ -293,7 +301,7 @@ defmodule Jocker.CLI.Container do
 
   defp stop_container(container_id) do
     case rpc([Jocker.Engine.Container, :stop, [container_id]]) do
-      {:ok, container(id: id)} ->
+      {:ok, %Container{id: id}} ->
         to_cli("#{id}\n")
 
       {:error, :not_running} ->

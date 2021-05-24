@@ -45,6 +45,9 @@ defmodule Jocker.Engine.Dockerfile do
         {"USER", user} ->
           {:user, trim(user)}
 
+        {"ENV", env_var} ->
+          {:env, clean_envvar(env_var)}
+
         {"RUN", <<"[", _::binary>> = json_cmd} ->
           {:run, json_decode(json_cmd)}
 
@@ -73,7 +76,7 @@ defmodule Jocker.Engine.Dockerfile do
           {:volume, args}
 
         unknown_instruction ->
-          IO.puts("WARNING: Instruction '#{unknown_instruction}' not understood\n")
+          IO.puts("WARNING: Instruction '#{instruction_line}' not understood\n")
           {:unparsed, unknown_instruction}
       end
 
@@ -96,5 +99,11 @@ defmodule Jocker.Engine.Dockerfile do
   defp json_decode(json) do
     {:ok, valid_json} = Jason.decode(json)
     valid_json
+  end
+
+  defp clean_envvar(env_var) do
+    [key, value] = String.split(env_var, "=")
+    value = String.trim(value, "\"")
+    "#{key}=#{value}"
   end
 end

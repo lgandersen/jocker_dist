@@ -1,33 +1,31 @@
-defmodule Jocker.Structs.Network do
-  @derive Jason.Encoder
-  defstruct id: nil,
-            name: nil,
-            subnet: nil,
-            if_name: nil,
-            default_gw_if: nil
-end
-
-defmodule Jocker.Structs.EndPointConfig do
-  @derive Jason.Encoder
-  defstruct id: nil,
-            name: nil,
-            subnet: nil,
-            if_name: nil,
-            ip_addresses: [],
-            default_gw_if: nil
-end
-
 defmodule Jocker.Engine.Network do
   use GenServer
-  alias Jocker.Engine.Config
-  alias Jocker.Engine.Container
-  alias Jocker.Engine.Utils
-  alias Jocker.Engine.MetaData
-  alias Jocker.Structs.EndPointConfig
-  alias Jocker.Structs.Network
+  alias Jocker.Engine.{Config, Container, Utils, MetaData}
   require Logger
-  require Record
-  import Jocker.Engine.Records
+
+  @derive Jason.Encoder
+  defstruct id: nil,
+            name: nil,
+            subnet: nil,
+            if_name: nil,
+            default_gw_if: nil
+
+  alias __MODULE__, as: Network
+
+  defmodule EndPointConfig do
+    @derive Jason.Encoder
+    defstruct id: nil,
+              name: nil,
+              subnet: nil,
+              if_name: nil,
+              ip_addresses: [],
+              default_gw_if: nil
+  end
+
+  defmodule State do
+    defstruct pf_config_path: nil,
+              gateway_interface: nil
+  end
 
   @type create_options() :: [create_option()]
   @type create_option() ::
@@ -55,13 +53,6 @@ defmodule Jocker.Engine.Network do
   <%= jocker_filtering %>
   ### JOCKER FILTERING RULES END #######
   """
-
-  defmodule Jocker.Engine.Network.State do
-    defstruct pf_config_path: nil,
-              gateway_interface: nil
-  end
-
-  alias Jocker.Engine.Network.State
 
   def start_link([]) do
     GenServer.start_link(__MODULE__, [], name: __MODULE__)
@@ -223,7 +214,7 @@ defmodule Jocker.Engine.Network do
     {:error, "Unknown driver"}
   end
 
-  defp connect_(container(id: container_id), %Network{id: "host"} = network) do
+  defp connect_(%Container{id: container_id}, %Network{id: "host"} = network) do
     cond do
       Container.is_running?(container_id) ->
         # A jail with 'ip4="new"' (or using a VNET) cannot be modified to use 'ip="inherit"'
@@ -244,7 +235,7 @@ defmodule Jocker.Engine.Network do
     end
   end
 
-  defp connect_(container(id: container_id), network) do
+  defp connect_(%Container{id: container_id}, network) do
     case MetaData.connected_networks(container_id) do
       [%Network{id: "host"}] ->
         {:error, "connected to host network"}
@@ -282,7 +273,7 @@ defmodule Jocker.Engine.Network do
   end
 
   def disconnect_(container_idname, network_idname) do
-    cont = container(id: container_id) = MetaData.get_container(container_idname)
+    cont = %Container{id: container_id} = MetaData.get_container(container_idname)
     network = MetaData.get_network(network_idname)
     config = MetaData.get_endpoint_config(container_id, network.id)
 

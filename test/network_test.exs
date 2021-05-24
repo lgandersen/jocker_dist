@@ -1,31 +1,18 @@
 defmodule NetworkTest do
   use ExUnit.Case
-  alias Jocker.Engine.Network
-  alias Jocker.Engine.Config
-  alias Jocker.Engine.Utils
-  alias Jocker.Engine.MetaData
-  alias Jocker.Engine.Container
-  alias Jocker.Structs
-  import Jocker.Engine.Records
+  alias Jocker.Engine.{Network, Config, Utils, MetaData, Container}
 
   setup_all do
     Application.stop(:jocker)
     TestHelper.clear_zroot()
-    start_supervised(Config)
-    start_supervised(MetaData)
+    {:ok, _pid} = start_supervised(Config)
+    {:ok, _pid} = start_supervised(MetaData)
     :ok
   end
 
   setup do
-    MetaData.clear_tables()
+    on_exit(fn -> MetaData.remove_network("host") end)
     :ok
-  end
-
-  test "default interface is created at startup" do
-    Utils.destroy_interface("jocker0")
-    {:ok, _pid} = Network.start_link([])
-
-    assert Utils.interface_exists("jocker0")
   end
 
   test "default interface is not defined at startup" do
@@ -38,11 +25,18 @@ defmodule NetworkTest do
     Config.put("default_network_name", "default")
   end
 
+  test "default interface is created at startup" do
+    Utils.destroy_interface("jocker0")
+    {:ok, _pid} = Network.start_link([])
+
+    assert Utils.interface_exists("jocker0")
+  end
+
   test "create, get and remove a new network" do
     Utils.destroy_interface("jocker1")
     {:ok, _pid} = Network.start_link([])
 
-    assert {:ok, %Structs.Network{name: "testnetwork"} = test_network} =
+    assert {:ok, %Network{name: "testnetwork"} = test_network} =
              Network.create("testnetwork", subnet: "172.18.0.0/16", ifname: "jocker1")
 
     assert Utils.interface_exists("jocker1")
@@ -57,15 +51,17 @@ defmodule NetworkTest do
     Utils.destroy_interface("jocker1")
     {:ok, _pid} = Network.start_link([])
 
-    assert [%Structs.Network{id: "host"}, %Structs.Network{name: "default"}] = Network.list()
+    assert [%Network{name: "default"}, %Network{id: "host"}] = Network.list()
 
-    {:ok, _network} = Network.create("testnetwork", subnet: "172.18.0.0/16", ifname: "jocker1")
+    {:ok, network} = Network.create("testnetwork", subnet: "172.18.0.0/16", ifname: "jocker1")
 
     assert [
-             %Structs.Network{id: "host"},
-             %Structs.Network{name: "default"},
-             %Structs.Network{name: "testnetwork"}
+             %Network{name: "default"},
+             %Network{id: "host"},
+             %Network{name: "testnetwork"}
            ] = Network.list()
+
+    assert Network.remove("testnetwork") == {:ok, network.id}
   end
 
   test "remove a non-existing network" do
@@ -106,36 +102,37 @@ defmodule NetworkTest do
     )
 
     network_if = "jocker1"
-    Network.create("testnet", subnet: "172.19.0.0/24", ifname: network_if)
+    {:ok, test_network} = Network.create("testnet", subnet: "172.19.0.0/24", ifname: network_if)
 
     opts = [
       cmd: ["/usr/bin/netstat", "--libxo", "json", "-4", "-n", "-I", network_if]
     ]
 
-    {:ok, container(id: id)} = Container.create(opts)
+    {:ok, %Container{id: id}} = Container.create(opts)
 
     Network.connect(id, "testnet")
     :ok = Container.attach(id)
     Container.start(id)
     {:ok, output} = Jason.decode(TestHelper.collect_container_output(id))
     assert %{"statistics" => %{"interface" => [%{"address" => "172.19.0.0"}]}} = output
-    Network.remove("testnetwork")
+    assert Network.remove("testnet") == {:ok, test_network.id}
   end
 
   test "using 'host' network instead of 'default'" do
     {:ok, _pid} = Jocker.Engine.Layer.start_link([])
     {:ok, _pid} = Network.start_link([])
 
-    start_supervised(
-      {DynamicSupervisor, name: Jocker.Engine.ContainerPool, strategy: :one_for_one}
-    )
+    {:ok, _pid} =
+      start_supervised(
+        {DynamicSupervisor, name: Jocker.Engine.ContainerPool, strategy: :one_for_one}
+      )
 
     opts = [
       networks: ["host"],
       cmd: ["/usr/bin/netstat", "--libxo", "json", "-i", "-4"]
     ]
 
-    {:ok, container(id: id)} = Container.create(opts)
+    {:ok, %Container{id: id}} = Container.create(opts)
 
     {output_json, 0} = System.cmd("/usr/bin/netstat", ["--libxo", "json", "-i", "-4"])
     ips_before = ips_on_all_interfaces(output_json)
@@ -163,7 +160,7 @@ defmodule NetworkTest do
       cmd: ["/usr/bin/host", "-t", "A", "freebsd.org", "1.1.1.1"]
     ]
 
-    {:ok, container(id: id)} = Container.create(opts)
+    {:ok, %Container{id: id}} = Container.create(opts)
     :ok = Container.attach(id)
     Container.start(id)
 
